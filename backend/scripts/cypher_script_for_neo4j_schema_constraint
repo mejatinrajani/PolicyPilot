@@ -1,0 +1,15 @@
+// 1. Core Document and Rule Constraints
+CREATE CONSTRAINT unique_document_id IF NOT EXISTS FOR (d:Document) REQUIRE d.id IS UNIQUE;
+CREATE CONSTRAINT unique_rule_id IF NOT EXISTS FOR (r:Rule) REQUIRE r.id IS UNIQUE;
+
+// 2. Thresholds and Exceptions
+CREATE CONSTRAINT unique_threshold_id IF NOT EXISTS FOR (t:Threshold) REQUIRE t.id IS UNIQUE;
+CREATE CONSTRAINT unique_exception_id IF NOT EXISTS FOR (e:Exception) REQUIRE e.id IS UNIQUE;
+
+// 3. Cross-References and Supreme Court Precedents
+CREATE CONSTRAINT unique_ruleref_name IF NOT EXISTS FOR (ref:RuleRef) REQUIRE ref.name IS UNIQUE;
+CREATE CONSTRAINT unique_precedent_id IF NOT EXISTS FOR (p:Precedent) REQUIRE p.id IS UNIQUE;
+
+// 4. Performance Indexes for LangGraph Routing
+CREATE INDEX rule_domain_idx IF NOT EXISTS FOR (r:Rule) ON (r.domain);
+CREATE INDEX rule_clause_idx IF NOT EXISTS FOR (r:Rule) ON (r.clause);
