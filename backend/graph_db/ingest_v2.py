@@ -1,15 +1,18 @@
 import os
+# MUST BE AT THE VERY TOP: Fixes Windows [WinError 1314] Symlink crash
+os.environ["HF_HUB_DISABLE_SYMLINKS"] = "1"
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+
 import json
 import time
 from pathlib import Path
 from dotenv import load_dotenv
-from langchain_text_splitters import MarkdownHeaderTextSplitter
+from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
 from groq import Groq
 from neo4j import GraphDatabase
 from docling.document_converter import DocumentConverter
 from schema import LegalExtractionBatch
 
-# 1. Resolve Dynamic Paths
 CURRENT_FILE = Path(__file__).resolve()
 BACKEND_DIR = CURRENT_FILE.parent.parent
 PROJECT_ROOT = BACKEND_DIR.parent
@@ -18,16 +21,14 @@ ENV_PATH = BACKEND_DIR / ".env"
 
 load_dotenv(dotenv_path=ENV_PATH)
 
-# 2. Initialize Neo4j Driver & Docling
 neo4j_driver = GraphDatabase.driver(
     os.getenv("NEO4J_URI"),
     auth=(os.getenv("NEO4J_USERNAME"), os.getenv("NEO4J_PASSWORD"))
 )
 
-print("Initializing Docling AI Models...")
+print("Initializing Docling AI Models (Symlinks Disabled)...")
 doc_converter = DocumentConverter()
 
-# 3. Setup Groq Key Rotation
 GROQ_KEYS = [os.getenv("GROQ_API_KEY_1"), os.getenv("GROQ_API_KEY_2")]
 GROQ_KEYS = [k for k in GROQ_KEYS if k]
 if not GROQ_KEYS:
@@ -60,7 +61,7 @@ def extract_entities_with_retry(markdown_chunk: str, doc_id: str, max_retries=3)
     for attempt in range(max_retries):
         try:
             response = client.chat.completions.create(
-                 model="openai/gpt-oss-120b",
+                model="openai/gpt-oss-120b",
                 messages=[
                     {
                         "role": "system", 
@@ -76,9 +77,9 @@ def extract_entities_with_retry(markdown_chunk: str, doc_id: str, max_retries=3)
             
         except Exception as e:
             err_msg = str(e).lower()
-            if "429" in err_msg or "rate limit" in err_msg:
-                wait_time = 45  # Sleep to clear Groq limits
-                print(f"   [!] Groq Rate Limit Hit. Sleeping for {wait_time}s (Attempt {attempt+1}/{max_retries})...")
+            if "429" in err_msg or "rate limit" in err_msg or "413" in err_msg:
+                wait_time = 65  # Groq TPM limits reset every 60 seconds
+                print(f"   [!] Groq Limit Hit. Sleeping for {wait_time}s (Attempt {attempt+1}/{max_retries})...")
                 time.sleep(wait_time)
                 client = get_next_groq_client() 
             else:
@@ -143,15 +144,28 @@ def process_file(file_path: Path, doc_id: str):
         conv_result = doc_converter.convert(str(file_path))
         full_markdown = conv_result.document.export_to_markdown()
 
-    splitter = MarkdownHeaderTextSplitter(
+    # Step 1: Structural Split by Headers
+    header_splitter = MarkdownHeaderTextSplitter(
         headers_to_split_on=[("#", "H1"), ("##", "H2"), ("###", "H3")]
     )
-    splits = splitter.split_text(full_markdown)
-    print(f"-> Created {len(splits)} structural chunks.")
+    initial_splits = header_splitter.split_text(full_markdown)
+
+    # Step 2: Safety Split for Token Limits (Max ~3000 tokens per chunk)
+    char_splitter = RecursiveCharacterTextSplitter(chunk_size=12000, chunk_overlap=500)
+    final_splits = []
+    
+    for split in initial_splits:
+        if len(split.page_content) > 12000:
+            # FIXED: Used plural split_documents and wrapped split in a list
+            final_splits.extend(char_splitter.split_documents([split]))
+        else:
+            final_splits.append(split)
+
+    print(f"-> Created {len(final_splits)} safe chunks.")
 
     with neo4j_driver.session() as session:
-        for idx, chunk in enumerate(splits):
-            print(f"\n   Extracting chunk {idx + 1}/{len(splits)}...")
+        for idx, chunk in enumerate(final_splits):
+            print(f"\n   Extracting chunk {idx + 1}/{len(final_splits)}...")
             extracted_batch = extract_entities_with_retry(chunk.page_content, doc_id)
             
             if extracted_batch and extracted_batch.rules:
@@ -159,14 +173,15 @@ def process_file(file_path: Path, doc_id: str):
                 print(f"   [+] Committed {len(extracted_batch.rules)} rules to Neo4j.")
             else:
                 print(f"   [-] Chunk {idx + 1} produced no actionable rules.")
+            
+            # Base 3-second sleep between standard API calls to pace the free tier
+            time.sleep(3)
 
+# REMOVED the 3 successfully processed files to save tokens
 DOCUMENT_REGISTRY = {
     "Master_Circular_on_Health_Insurance_Business_29052024.pdf": "IRDAI_MC_HEALTH_2024",
     "Insurance_Act_1938.pdf": "ACT_INSURANCE_1938",
-    "The Consumer Protection Act, 2019.pdf": "ACT_CONSUMER_PROTECTION_2019",
     "Motor Vehicles Act, 1988 (Amended 2019).pdf": "ACT_MOTOR_VEHICLES_1988",
-    "INSURANCE OMBUDSMAN RULES, 2017 AS AMENDED TILL 18.05.2021.pdf": "RULES_OMBUDSMAN_2017",
-    "MC_General_Insurance_Business.pdf": "IRDAI_MC_GENERAL_2024",
     "MC_Life_Insurance_Products.pdf": "IRDAI_MC_LIFE_2024",
     "MC_Protection_of_Policyholders_interests_2024.pdf": "IRDAI_MC_PROTECTION_2024",
     "MC_Operations_and_Allied_Matters_of_Insurers.pdf": "IRDAI_MC_OPERATIONS_2024",
