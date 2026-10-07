@@ -179,12 +179,6 @@ def process_file(file_path: Path, doc_id: str):
 
 # REMOVED the 3 successfully processed files to save tokens
 DOCUMENT_REGISTRY = {
-    "Master_Circular_on_Health_Insurance_Business_29052024.pdf": "IRDAI_MC_HEALTH_2024",
-    "Insurance_Act_1938.pdf": "ACT_INSURANCE_1938",
-    "Motor Vehicles Act, 1988 (Amended 2019).pdf": "ACT_MOTOR_VEHICLES_1988",
-    "MC_Life_Insurance_Products.pdf": "IRDAI_MC_LIFE_2024",
-    "MC_Protection_of_Policyholders_interests_2024.pdf": "IRDAI_MC_PROTECTION_2024",
-    "MC_Operations_and_Allied_Matters_of_Insurers.pdf": "IRDAI_MC_OPERATIONS_2024",
     "Supreme_Court_Precedents.md": "SC_PRECEDENTS_CANONICAL"
 }
 
