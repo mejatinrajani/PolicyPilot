@@ -1,4 +1,10 @@
 import os
+import numpy as np
+# MUST BE AT THE VERY TOP: Fixes Windows [WinError 1314] Symlink crash for HuggingFace / FastEmbed
+os.environ["HF_HUB_DISABLE_SYMLINKS"] = "1"
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+
+import torch
 from pathlib import Path
 from dotenv import load_dotenv
 from neo4j import GraphDatabase
@@ -10,7 +16,8 @@ from sentence_transformers import SentenceTransformer
 CURRENT_FILE = Path(__file__).resolve()
 VECTOR_DB_DIR = CURRENT_FILE.parent
 BACKEND_DIR = VECTOR_DB_DIR.parent
-QDRANT_STORAGE_PATH = VECTOR_DB_DIR / "qdrant_storage"
+QDRANT_STORAGE_PATH = VECTOR_DB_DIR / "storage"
+CACHE_PATH = VECTOR_DB_DIR / "dense_cache.npy" # <-- NEW: Cache file to protect your 10-minute generations
 ENV_PATH = BACKEND_DIR / ".env"
 
 load_dotenv(dotenv_path=ENV_PATH)
@@ -28,10 +35,10 @@ COLLECTION_NAME = "irdai_legal_rules"
 
 # 4. Initialize the Hybrid Models
 print("Loading Snowflake Arctic v2.0 & SPLADE Models (Runs locally)...")
-# Snowflake model for Dense Semantic Meaning (1024 dimensions)
-dense_model = SentenceTransformer("Snowflake/snowflake-arctic-embed-l-v2.0")
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Hardware Acceleration: {device.upper()}")
 
-# FastEmbed SPLADE for Sparse Keyword Matching
+dense_model = SentenceTransformer("Snowflake/snowflake-arctic-embed-l-v2.0", device=device)
 sparse_model = SparseTextEmbedding(model_name="prithivida/Splade_PP_en_v1")
 
 def setup_qdrant_collection():
@@ -44,7 +51,7 @@ def setup_qdrant_collection():
         collection_name=COLLECTION_NAME,
         vectors_config={
             "dense": models.VectorParams(
-                size=1024, # Updated to match Snowflake Arctic's 1024 dimensions
+                size=1024, 
                 distance=models.Distance.COSINE
             )
         },
@@ -97,16 +104,27 @@ def ingest_to_qdrant():
     print(f"Formatting {len(records)} rules and calculating embeddings...")
     documents = [format_for_embedding(record) for record in records]
     
-    # Prefix required by Snowflake for document indexing
-    snowflake_docs = [f" {doc}" for doc in documents] 
+    # --- RESILIENCE UPGRADE: Caching Dense Embeddings ---
+    if CACHE_PATH.exists():
+        print("⚡ FOUND CACHE: Loading Dense Embeddings from disk (Bypassing 10-minute generation)...")
+        dense_embeddings = np.load(CACHE_PATH)
+    else:
+        print("Generating Dense Embeddings (Snowflake Arctic v2.0)...")
+        snowflake_docs = [f" {doc}" for doc in documents] 
+        dense_embeddings = dense_model.encode(
+            snowflake_docs,
+            batch_size=16,
+            show_progress_bar=True,
+            normalize_embeddings=True
+        )
+        print("Saving Dense Embeddings to local cache file...")
+        np.save(CACHE_PATH, dense_embeddings)
     
-    print("Generating Dense Embeddings (Snowflake Arctic v2.0)...")
-    dense_embeddings = dense_model.encode(snowflake_docs)
+    print("Generating Sparse Embeddings (SPLADE) in safe batches...")
+    # FIXED: Added batch_size=16 to prevent the 10.8 GB RAM crash
+    sparse_embeddings = list(sparse_model.embed(documents, batch_size=16))
     
-    print("Generating Sparse Embeddings (SPLADE)...")
-    sparse_embeddings = list(sparse_model.embed(documents))
-    
-    print("Uploading vectorized payloads to Qdrant...")
+    print("Uploading vectorized payloads to Qdrant (Batched)...")
     points = []
     for idx, record in enumerate(records):
         sparse_vector = models.SparseVector(
@@ -131,10 +149,13 @@ def ingest_to_qdrant():
             )
         )
         
-    qdrant_client.upsert(
-        collection_name=COLLECTION_NAME,
-        points=points
-    )
+    batch_size = 100
+    for i in range(0, len(points), batch_size):
+        qdrant_client.upsert(
+            collection_name=COLLECTION_NAME,
+            points=points[i:i + batch_size]
+        )
+        print(f"  -> Uploaded batch {i//batch_size + 1}/{(len(points)-1)//batch_size + 1}")
     
     print(f"✅ Hybrid Vector Sync Complete! Embedded {len(records)} rules locally in {QDRANT_STORAGE_PATH}")
 
@@ -143,4 +164,4 @@ if __name__ == "__main__":
         ingest_to_qdrant()
     finally:
         neo4j_driver.close()
-        qdrant_client.close()   
+        qdrant_client.close()
