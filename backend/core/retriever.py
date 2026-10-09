@@ -35,11 +35,9 @@ class FederatedRetriever:
             return {record["rule_id"]: record.data() for record in result}
 
     def execute_search(self, sub_queries: list, top_k: int = 3) -> str:
-        """Phase 3: Executes RRF search and Graph enrichment across sub-queries."""
         all_rule_ids = set()
         search_results = []
         
-        # Fan out across the decomposed sub-queries
         for query in sub_queries:
             snowflake_query = f"Represent this sentence for searching relevant passages: {query}"
             dense_vector = self.dense_model.encode(snowflake_query, normalize_embeddings=True).tolist()
@@ -61,7 +59,6 @@ class FederatedRetriever:
             )
             search_results.extend(res.points)
             
-        # Deduplicate results
         unique_points = []
         for point in search_results:
             rule_id = point.payload['neo4j_rule_id']
@@ -69,10 +66,8 @@ class FederatedRetriever:
                 all_rule_ids.add(rule_id)
                 unique_points.append(point)
                 
-        # Bridge to Neo4j
         graph_data = self._get_graph_context(list(all_rule_ids))
         
-        # Assemble Payload
         context_str = ""
         for point in unique_points:
             rule_id = point.payload['neo4j_rule_id']

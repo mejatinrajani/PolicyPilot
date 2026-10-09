@@ -1,11 +1,20 @@
+import os
+# MUST BE AT THE VERY TOP: Fixes Windows [WinError 1314] Symlink crash for HuggingFace / Laya downloads
+os.environ["HF_HUB_DISABLE_SYMLINKS"] = "1"
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from dotenv import load_dotenv
-from core.workflow import AdjudicationWorkflow
 
+# Load .env before initializing the workflow so Groq keys are available
 load_dotenv()
 
+from core.workflow import AdjudicationWorkflow
+
 app = FastAPI(title="PolicyPilot Agentic GraphRAG")
+
+# Initializes Laya, Qdrant, Neo4j, and Groq once in the main process
 workflow = AdjudicationWorkflow()
 
 class QueryRequest(BaseModel):
@@ -28,4 +37,5 @@ async def process_legal_query(request: QueryRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    # FIXED: Passed 'app' directly and removed reload=True to prevent Windows file-lock crashes
+    uvicorn.run(app, host="0.0.0.0", port=8000)

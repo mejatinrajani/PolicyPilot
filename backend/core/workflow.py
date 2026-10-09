@@ -1,18 +1,18 @@
-from core.jev_client import JevEngine
+from core.laya_client import LayaEngine
 from core.groq_client import GroqEngine
 from core.retriever import FederatedRetriever
 
 class AdjudicationWorkflow:
     def __init__(self):
-        self.jev = JevEngine()
+        self.laya = LayaEngine()
         self.groq = GroqEngine()
         self.retriever = FederatedRetriever()
 
     async def run(self, original_query: str) -> dict:
-        metrics = {"loops": 0, "status": "success", "jev_scores": {}}
+        metrics = {"loops": 0, "status": "success", "laya_scores": {}}
         
         # Phase 1: Gatekeeper
-        if not self.jev.gatekeeper_check(original_query):
+        if not self.laya.gatekeeper_check(original_query):
             return {
                 "final_ruling": self.groq.fast_fallback(),
                 "execution_metrics": {"status": "out_of_scope"}
@@ -20,7 +20,7 @@ class AdjudicationWorkflow:
             
         # Phase 2: Planner & Strategy
         sub_queries = self.groq.decompose_query(original_query)
-        strategy = self.jev.select_strategy(sub_queries)
+        strategy = self.laya.select_strategy(sub_queries)
         
         # Phase 3: Retrieval
         context = self.retriever.execute_search(sub_queries)
@@ -34,9 +34,9 @@ class AdjudicationWorkflow:
             metrics["loops"] = attempt
             final_ruling = self.groq.synthesize_adjudication(original_query, context, critique)
             
-            # Jev Validation
-            validation = self.jev.guardrail_check(final_ruling, context)
-            metrics["jev_scores"] = {
+            # Local Validation via Laya
+            validation = self.laya.guardrail_check(final_ruling, context)
+            metrics["laya_scores"] = {
                 "faithfulness": validation["faith_score"],
                 "completeness": validation["complete_score"]
             }
