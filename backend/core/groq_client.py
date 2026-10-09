@@ -68,10 +68,12 @@ class GroqEngine:
         )
         return response.choices[0].message.content
 
-    def decompose_query(self, user_prompt: str) -> list:
+    def decompose_query(self, user_prompt: str) -> dict:
         system_prompt = """
-        You are a legal analyst. Deconstruct the user's scenario into a JSON array of 1 to 3 atomic search queries optimized for a vector database.
-        Output ONLY raw JSON format with a 'queries' key.
+        You are a legal analyst. Deconstruct the user's scenario.
+        Output ONLY raw JSON format with two keys:
+        1. 'domain_filters': An array of applicable insurance domains. Choose ONLY from: ["LIFE", "HEALTH", "MOTOR", "GENERAL", "UNIVERSAL"]. If unsure, include "UNIVERSAL".
+        2. 'queries': An array of 1 to 3 atomic search queries optimized for a vector database.
         """
         response = self._execute_with_rotation(
             model=self.heavy_model,
@@ -81,8 +83,7 @@ class GroqEngine:
             ],
             response_format={"type": "json_object"}
         )
-        content = json.loads(response.choices[0].message.content)
-        return content.get("queries", [user_prompt])
+        return json.loads(response.choices[0].message.content)
 
     def synthesize_adjudication(self, original_query: str, context: str, critique: str = None) -> str:
         system_prompt = """

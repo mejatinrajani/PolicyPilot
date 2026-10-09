@@ -4,7 +4,7 @@ from pathlib import Path
 from neo4j import GraphDatabase
 from qdrant_client import QdrantClient, models
 from fastembed import SparseTextEmbedding
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer, CrossEncoder
 
 class FederatedRetriever:
     def __init__(self):
@@ -18,6 +18,10 @@ class FederatedRetriever:
         device = "cuda" if torch.cuda.is_available() else "cpu"
         self.dense_model = SentenceTransformer("Snowflake/snowflake-arctic-embed-l-v2.0", device=device)
         self.sparse_model = SparseTextEmbedding(model_name="prithivida/Splade_PP_en_v1")
+        
+        # NEW: Load the Cross-Encoder for logical reranking
+        print("Booting Reranker Engine...")
+        self.cross_encoder = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2", device=device)
         self.collection = "irdai_legal_rules"
 
     def _get_graph_context(self, rule_ids: list) -> dict:
@@ -34,48 +38,62 @@ class FederatedRetriever:
             result = session.run(query, rule_ids=rule_ids)
             return {record["rule_id"]: record.data() for record in result}
 
-    def execute_search(self, sub_queries: list, top_k: int = 3) -> str:
+    def execute_search(self, original_query: str, sub_queries: list, domain_filters: list, final_top_k: int = 5) -> str:
         all_rule_ids = set()
         search_results = []
         
+        # 1. Broad Fetch: Get Top 15 instead of Top 3 to avoid missing the "needle"
         for query in sub_queries:
             snowflake_query = f"Represent this sentence for searching relevant passages: {query}"
             dense_vector = self.dense_model.encode(snowflake_query, normalize_embeddings=True).tolist()
-            
             sparse_result = next(self.sparse_model.query_embed(query))
             sparse_vector = models.SparseVector(
-                indices=sparse_result.indices.tolist(),
-                values=sparse_result.values.tolist()
+                indices=sparse_result.indices.tolist(), values=sparse_result.values.tolist()
             )
             
             res = self.qdrant_client.query_points(
                 collection_name=self.collection,
                 prefetch=[
-                    models.Prefetch(query=dense_vector, using="dense", limit=5),
-                    models.Prefetch(query=sparse_vector, using="sparse", limit=5)
+                    models.Prefetch(query=dense_vector, using="dense", limit=15),
+                    models.Prefetch(query=sparse_vector, using="sparse", limit=15)
                 ],
                 query=models.FusionQuery(fusion=models.Fusion.RRF),
-                limit=top_k
+                limit=15
             )
             search_results.extend(res.points)
             
-        unique_points = []
-        for point in search_results:
-            rule_id = point.payload['neo4j_rule_id']
-            if rule_id not in all_rule_ids:
-                all_rule_ids.add(rule_id)
-                unique_points.append(point)
-                
-        graph_data = self._get_graph_context(list(all_rule_ids))
+        unique_rule_ids = list(set(point.payload['neo4j_rule_id'] for point in search_results))
+        graph_data = self._get_graph_context(unique_rule_ids)
         
-        context_str = ""
-        for point in unique_points:
-            rule_id = point.payload['neo4j_rule_id']
-            context = graph_data.get(rule_id, {})
+        # 2. Hard Domain Gating
+        filtered_candidates = []
+        for rule_id, context in graph_data.items():
+            domain = context.get('domain', 'UNIVERSAL')
+            # If the LLM specified domains, strictly drop mismatched domains (allow UNIVERSAL fallback)
+            if domain_filters and domain not in domain_filters and domain != 'UNIVERSAL':
+                continue
+            filtered_candidates.append(context)
             
+        if not filtered_candidates:
+            return "No relevant regulatory context found for the specified domain."
+
+        # 3. Cross-Encoder Reranking
+        # Pair the original user query against every retrieved clause's text
+        cross_inp = [[original_query, c['verbatim']] for c in filtered_candidates]
+        scores = self.cross_encoder.predict(cross_inp)
+        
+        for idx, c in enumerate(filtered_candidates):
+            c['rerank_score'] = float(scores[idx])
+            
+        # Sort by logical relevance and slice the Top 5
+        filtered_candidates.sort(key=lambda x: x['rerank_score'], reverse=True)
+        top_candidates = filtered_candidates[:final_top_k]
+        
+        # 4. Context Assembly
+        context_str = ""
+        for context in top_candidates:
             context_str += f"Clause: {context.get('clause')} (Domain: {context.get('domain')})\n"
             context_str += f"Verbatim: {context.get('verbatim')}\n"
-            
             if context.get('thresholds'):
                 context_str += f"Thresholds: {', '.join(t for t in context['thresholds'] if t)}\n"
             if context.get('exceptions'):

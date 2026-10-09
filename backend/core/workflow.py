@@ -19,11 +19,14 @@ class AdjudicationWorkflow:
             }
             
         # Phase 2: Planner & Strategy
-        sub_queries = self.groq.decompose_query(original_query)
+        planner_output = self.groq.decompose_query(original_query)
+        sub_queries = planner_output.get("queries", [original_query])
+        domain_filters = planner_output.get("domain_filters", [])
+        
         strategy = self.laya.select_strategy(sub_queries)
         
-        # Phase 3: Retrieval
-        context = self.retriever.execute_search(sub_queries)
+        # Phase 3: Retrieval (Now passes the original query and domain filters)
+        context = self.retriever.execute_search(original_query, sub_queries, domain_filters)
         
         # Phase 4 & 5: Synthesis & Guardrail Loop
         max_retries = 2
